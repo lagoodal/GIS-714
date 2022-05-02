@@ -1,0 +1,338 @@
+---
+title: "Untitled"
+author: "Louis Goodall"
+date: "02/05/2022"
+output: pdf_document
+---
+
+# Load packages
+
+```{r}
+library(tidyverse)
+library(rFIA)
+library(gganimate)
+library(sf)
+library(lme4)
+library(educate)
+library(kableExtra)
+library(MuMIn)
+library(broom.mixed)
+library(sp)
+library(data.table)
+library(writexl)
+library(agricolae)
+library(cartography)
+library(viridis)
+library(ggmap)
+library(kableExtra)
+library(ggrepel)
+```
+
+# Load FIA data from local drive
+
+```{r}
+fiaNC <- readFIA('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/FIA Data/LANDIS_training/FIA')
+```
+
+# Load FIA data from local drive
+
+```{r}
+fiaNC <- readFIA('/Users/louisgoodall/Desktop/HOLY FUCK A PHD/The Big One/FIA Data/LANDIS_training/FIA')
+```
+
+# Carbon
+
+```{r}
+CARBON <- carbon(db = fiaNC,
+        landType = 'forest',
+        grpBy = c("COUNTYCD", "PLOT"))
+
+CARBON <- CARBON %>%
+  group_by(YEAR, COUNTYCD, PLOT) %>%
+  summarise(TOTAL_C = sum(CARB_ACRE))
+
+CARBON <- CARBON %>%
+  mutate(TOTAL_C, TOTAL_C_HEC = TOTAL_C/2.471)
+
+CARBON <- CARBON %>%
+# filter counties that are in the Piedmont and Mountain ecoregions (as defined in the FIADB User Guide)
+  filter(COUNTYCD %in% c("1", "59", "119", "167", "3", "63", "123", "169", "7", "67", "135", "171", "25", "69", "145", "179", "33", "71", "149", "181", "35", "77", "151", "183", "37", "81", "157", "185", "45", "97", "159", "197", "57", "109", "161", "5", "39", "111", "189", "9", "43", "113", "193", "11", "75", "115", "199", "21", "87", "121", "23", "89", "173", "27", "99", "175")) %>%
+  # create new column that assigns either "Piedmont" or "Mountains" to the specific county codes
+  mutate(COUNTYCD, Ecoregion = if_else(COUNTYCD %in% c("1", "59", "119", "167", "3", "63", "123", "169", "7", "67", "135", "171", "25", "69", "145", "179", "33", "71", "149", "181", "35", "77", "151", "183", "37", "81", "157", "185", "45", "97", "159", "197", "57", "109", "161"), "Piedmont", "Mountains"))
+
+# change columnn name for standardisation
+colnames(CARBON)[1] <- "INVYR"
+
+# write_xlsx(CARBON, "/Users/louisgoodall/Desktop/CARBON.xlsx")
+
+NEW.CARBON <- read_csv('/Users/louisgoodall/Desktop/CARBON.csv')
+# filter out years where there was < 1 | > 1 percent change to filter out the noise
+NEW.CARBON <- NEW.CARBON %>%
+  subset(!PERC_CHNG_C_HEC_YR <= 1 | !PERC_CHNG_C_HEC_YR >=-1)
+# join with the basal/disturbance table
+NEW.CARBON <- inner_join(NEW.CARBON, NEW.BA.DSTRB, by = c("INVYR", "COUNTYCD", "PLOT"))
+# join with LATLONG table so that ecoregion areas can be defined and utilised
+NEW.CARBON <- inner_join(NEW.CARBON, LATLONG, by = c("COUNTYCD", "PLOT")) %>%
+  select(INVYR, COUNTYCD, PLOT, TOTAL_C_HEC, INCR_C_HEC, PERC_CHNG_C_HEC, PERC_CHNG_C_HEC_YR, BA_m2_HA, INCRM_BA_YEAR_HA, PERC_CHNG_BA, PERC_CHNG_BA_YEAR, TRTCD1, DSTRBCD1, DSTRBNM, Region)
+# create dummy disturbance code and drop NAs
+NEW.CARBON <- NEW.CARBON %>%
+  mutate(DSTRBCD1, DUMMY_DISTRB = if_else(DSTRBCD1 == 0, 0, 1)) %>%
+  drop_na()
+#Dummy variable for Region
+NEW.CARBON <- NEW.CARBON %>%
+  mutate(DUMMY_REGION = if_else(Region == "Piedmont", 0, 1))
+# Create unique plot ID number
+NEW.CARBON <- NEW.CARBON %>%
+  mutate(UNIQUE.PLOT = (COUNTYCD*100) + PLOT)
+# change what the types of data are
+NEW.CARBON$PERC_CHNG_BA <- as.numeric(NEW.CARBON$PERC_CHNG_BA)
+NEW.CARBON$PERC_CHNG_BA_YEAR <- as.numeric(NEW.CARBON$PERC_CHNG_BA_YEAR)
+NEW.CARBON$INCRM_BA_YEAR_HA <- as.numeric(NEW.CARBON$INCRM_BA_YEAR_HA)
+NEW.CARBON$DUMMY_DISTRB <- as.factor(NEW.CARBON$DUMMY_DISTRB)
+NEW.CARBON$UNIQUE.PLOT <- as.factor(NEW.CARBON$UNIQUE.PLOT)
+NEW.CARBON$COUNTYCD <- as.factor(NEW.CARBON$COUNTYCD)
+NEW.CARBON$DSTRBNM <- as.factor(NEW.CARBON$DSTRBNM)
+NEW.CARBON$DUMMY_REGION <- as.factor(NEW.CARBON$DUMMY_REGION)
+
+# filter out outliers
+NEW.CARBON <- NEW.CARBON %>%
+  filter(PERC_CHNG_BA_YEAR < 101) %>%
+  filter(PERC_CHNG_C_HEC_YR < 300)
+```
+
+# Basal Area and Disturbance
+
+```{r}
+BA.DSTRB <- fiaNC$COND %>%
+  # selection variables that I wish to analyse
+  select(INVYR, COUNTYCD, PLOT, BALIVE, DSTRBCD1, DSTRBYR1) %>%
+  # filter inventory years
+  filter(INVYR %in% 2003:2020) %>%
+  # remove NAs from live basal area readings
+  drop_na(BALIVE) %>%
+  # add column that groups and defines distrubancd codes into logical classifications
+  mutate(DSTRBCD1, DSTRBNM = if_else(DSTRBCD1 == 0, "No Visible Disturbance",
+                                      if_else(DSTRBCD1 %in% 10:19, "Insect",
+                                              if_else(DSTRBCD1 %in% 20:29, "Disease",
+                                                      if_else(DSTRBCD1 %in% 30:39, "Fire",
+                                                              if_else(DSTRBCD1 %in% 40:49, "Animal Damage",
+                                                                      if_else(DSTRBCD1 == 52, "Wind",
+                                                                              if_else(DSTRBCD1 == 60, "Vegetation",
+                                                                                      if_else(DSTRBCD1 == 70, "Unknown",
+                                                                                              if_else(DSTRBCD1 == 80, "Human Induced", "Other Weather")))))))))) %>%
+  # filter counties that are in the Piedmont and Mountain ecoregions (as defined in the FIADB User Guide)
+  filter(COUNTYCD %in% c("1", "59", "119", "167", "3", "63", "123", "169", "7", "67", "135", "171", "25", "69", "145", "179", "33", "71", "149", "181", "35", "77", "151", "183", "37", "81", "157", "185", "45", "97", "159", "197", "57", "109", "161", "5", "39", "111", "189", "9", "43", "113", "193", "11", "75", "115", "199", "21", "87", "121", "23", "89", "173", "27", "99", "175")) %>%
+  # create new column that assigns either "Piedmont" or "Mountains" to the specific county codes
+  mutate(COUNTYCD, Ecoregion = if_else(COUNTYCD %in% c("1", "59", "119", "167", "3", "63", "123", "169", "7", "67", "135", "171", "25", "69", "145", "179", "33", "71", "149", "181", "35", "77", "151", "183", "37", "81", "157", "185", "45", "97", "159", "197", "57", "109", "161"), "Piedmont", "Mountains"))
+
+# Needed for an inner_join later on
+BA.DSTRB$YEAR <- BA.DSTRB$INVYR
+
+# # Dummy variable for 
+# BA.DSTRB <- BA.DSTRB %>%
+#   mutate(DSTRBCD1, DUMMY_HARVEST = if_else(DSTRBCD1 >0, 1, 0))
+
+# write_xlsx(BA.DSTRB, "/Users/louisgoodall/Desktop/BASAL.DISTURBANCE.xlsx")
+
+# Read in BASAL DISTURBANCE table
+NEW.BA.DSTRB <- read_csv('/Users/louisgoodall/Desktop/BASAL.DISTURBANCE.csv')
+# removes some notes that I put in the excel file
+NEW.BA.DSTRB <- NEW.BA.DSTRB %>%
+  select(INVYR, COUNTYCD, PLOT, BALIVE, DSTRBCD1, DSTRBYR1, DSTRBNM, Ecoregion, TRU_FAL)
+# Averages the BALIVE column by inventory year, county and plot
+NEW.BA.DSTRB <- NEW.BA.DSTRB %>%
+  group_by(INVYR, COUNTYCD, PLOT) %>%
+  summarise(BALIVE = mean(BALIVE))
+# joins old table with the new table so that the disturbance codes etc. are all in one table
+NEW.BA.DSTRB <- inner_join(NEW.BA.DSTRB, BA.DSTRB, by = c("INVYR", "COUNTYCD", "PLOT")) %>%
+  select(INVYR, COUNTYCD, PLOT, BALIVE.x, DSTRBCD1, DSTRBYR1, DSTRBNM, Ecoregion, YEAR) 
+# removes duplicatd rows based upon the average BALIVE values
+NEW.BA.DSTRB <- distinct(NEW.BA.DSTRB)
+# change column name of BALIVE.x back to BALIVE
+colnames(NEW.BA.DSTRB)[4] <- "BALIVE"
+# Create table where harvesting (treatment) codes are present
+TREATMENT <- fiaNC$COND %>%
+  select(INVYR, COUNTYCD, PLOT, TRTCD1) %>%
+  drop_na()
+# join tables together
+NEW.BA.DSTRB <- inner_join(TREATMENT, NEW.BA.DSTRB, by = c("INVYR", "COUNTYCD", "PLOT"))
+# dummy code for if harvesting has taken place. 0 = no observable treatment, 1 = some sort of treatment
+NEW.BA.DSTRB <- NEW.BA.DSTRB %>%
+  mutate(TRTCD1, HARVEST = if_else(TRTCD1 >0, 1, 0))
+# Filter out areas that have not been treated
+NEW.BA.DSTRB <- NEW.BA.DSTRB %>%
+  filter(HARVEST == 0)
+# removes duplicatd rows based upon the average BALIVE values
+NEW.BA.DSTRB <- distinct(NEW.BA.DSTRB)
+
+# write_xlsx(NEW.BA.DSTRB, "/Users/louisgoodall/Desktop/NEW.BASAL.DISTURBANCE.xlsx")
+
+ALL.COUNTY.PLOT <- read_csv('/Users/louisgoodall/Desktop/ALL.COUNTY.PLOT.csv')
+NEW.BA.DSTRB <- read_csv('/Users/louisgoodall/Desktop/NEW.BASAL.DISTURBANCE.csv')
+LATLONG <- read_csv('/Users/louisgoodall/Desktop/PLOT LOCATIONS.csv')
+
+
+ALL.COUNTY.PLOT <- ALL.COUNTY.PLOT %>%
+  filter(COUNTYCD %in% c("1", "59", "119", "167", "3", "63", "123", "169", "7", "67", "135", "171", "25", "69", "145", "179", "33", "71", "149", "181", "35", "77", "151", "183", "37", "81", "157", "185", "45", "97", "159", "197", "57", "109", "161", "5", "39", "111", "189", "9", "43", "113", "193", "11", "75", "115", "199", "21", "87", "121", "23", "89", "173", "27", "99", "175"))
+
+WHITE.CASTLE <- inner_join(ALL.COUNTY.PLOT, NEW.BA.DSTRB, by = c("INVYR", "COUNTYCD", "PLOT"))
+
+WHITE.CASTLE <- WHITE.CASTLE %>%
+  select(INVYR, COUNTYCD, PLOT, BIO_Mg_HEC, INCR_Mg_HEC_ANN, PERC_CHNG_Mg_HEC, PERC_CHNG_Mg_HEC_YEAR, BA_m2_HA, INCRM_BA_YEAR_HA, PERC_CHNG_BA, PERC_CHNG_BA_YEAR, DSTRBCD1) %>%
+  mutate(DSTRBCD1, DUMMY_DISTRB = if_else(DSTRBCD1 == 0, 0, 1)) %>%
+  drop_na()
+
+WHITE.CASTLE <- WHITE.CASTLE %>%
+  mutate(COUNTYCD, Ecoregion = if_else(COUNTYCD %in% c("1", "59", "119", "167", "3", "63", "123", "169", "7", "67", "135", "171", "25", "69", "145", "179", "33", "71", "149", "181", "35", "77", "151", "183", "37", "81", "157", "185", "45", "97", "159", "197", "57", "109", "161"), "Piedmont", "Mountains"))
+
+PLEASE.END <- read.csv('/Users/louisgoodall/Desktop/TESTING.DATA.csv')
+
+PLEASE.END <- PLEASE.END %>%
+  filter(PERC_CHNG_BA_YEAR < 100) %>%
+  filter(PERC_CHNG_Mg_HEC_YEAR < 250)
+
+PLEASE.END <- PLEASE.END %>%
+  mutate(UNIQUE.PLOT = (COUNTYCD*100) + PLOT)
+PLEASE.END <- inner_join(PLEASE.END, LATLONG, by = c("COUNTYCD", "PLOT"))
+
+PLEASE.END <- PLEASE.END %>%
+  select(INVYR, COUNTYCD, PLOT, PERC_CHNG_Mg_HEC_YEAR, PERC_CHNG_BA_YEAR, DUMMY_DISTRB, UNIQUE.PLOT, Region)
+PLEASE.END <- PLEASE.END %>%
+  mutate(DUMMY_REGION = if_else(Region == "Piedmont", 0, 1))
+
+PLEASE.END$COUNTYCD <- as.factor(PLEASE.END$COUNTYCD)
+PLEASE.END$UNIQUE.PLOT <- as.factor(PLEASE.END$UNIQUE.PLOT)
+PLEASE.END$DUMMY_DISTRB <- as.factor(PLEASE.END$DUMMY_DISTRB)
+PLEASE.END$DUMMY_REGION <- as.factor(PLEASE.END$DUMMY_REGION)
+```
+
+# ANOVA
+
+```{r}
+# Biomass ANOVA
+BIO.AOV <- aov(PERC_CHNG_Mg_HEC_YEAR ~ DUMMY_DISTRB*DUMMY_REGION, data = PLEASE.END)
+# Carbon ANOVA
+C.AOV <- aov(PERC_CHNG_C_HEC_YR ~ DUMMY_DISTRB*DUMMY_REGION, data = NEW.CARBON)
+summary(BIO.AOV)
+summary(C.AOV)
+
+# LSD post-hoc biomass
+BIO.LSD <- LSD.test(BIO.AOV, "DUMMY_DISTRB", p.adj = "bonferroni")
+BIO.LSD
+# LSD post-hoc carbon
+C.LSD <- LSD.test(C.AOV, "DUMMY_DISTRB", p.adj = "bonferroni")
+C.LSD
+
+# Create table for graphing % change in carbon by ecoregion and disturbance
+standard.error.C <- NEW.CARBON %>%
+  group_by(Region, DUMMY_DISTRB) %>%
+  summarize(n.Plots = n(),
+            mean.Carbon = mean(PERC_CHNG_C_HEC_YR),
+            sd.Carbon = sd(PERC_CHNG_C_HEC_YR)) %>%
+  mutate(se.Carbon = sd.Carbon/sqrt(n.Plots))
+limits.C <- aes(ymax = mean.Carbon + se.Carbon, ymin = mean.Carbon - se.Carbon)
+
+# Graph % change in carbon
+Carbon.Ecoregion <- ggplot(standard.error.C, aes(x = DUMMY_DISTRB, y = mean.Carbon)) +
+  geom_bar(color = "black", fill = "white", stat = "identity") +
+  theme_classic() +
+  geom_errorbar(limits.C, width = 0.25) +
+  facet_wrap(~Region) +
+  xlab("Disturbance") +
+  scale_x_discrete(breaks = c("0", "1", "0", "1"),
+                   labels = c("Absent", "Present", "Absent", "Present")) +
+  ylab("% change in C (Mg/ha/yr)") +
+  geom_text(aes(label = c("a", "b", "a", "b"), vjust = -8)) +
+  ylim(-2, max(standard.error.C$mean.Carbon)*1.2)
+
+# Create table for graphing % change in biomass by ecoregion and disturbance
+standard.error.Bio <- PLEASE.END %>%
+  group_by(Region, DUMMY_DISTRB) %>%
+  summarize(n.Plots = n(),
+            mean.Bio = mean(PERC_CHNG_Mg_HEC_YEAR),
+            sd.Bio = sd(PERC_CHNG_Mg_HEC_YEAR)) %>%
+  mutate(se.Bio = sd.Bio/sqrt(n.Plots))
+limits.Bio <- aes(ymax = mean.Bio + se.Bio, ymin = mean.Bio - se.Bio)
+
+# Graph % change in biomass
+ggplot(standard.error.Bio, aes(x = DUMMY_DISTRB, y = mean.Bio)) +
+  geom_bar(color = "black", fill = "white", stat = "identity") +
+  theme_classic() +
+  geom_errorbar(limits.Bio, width = 0.25) +
+  facet_wrap(~Region) +
+  xlab("Disturbance") +
+  scale_x_discrete(breaks = c("0", "1", "0", "1"),
+                   labels = c("Absent", "Present", "Absent", "Present")) +
+  ylab("% change in biomass (Mg/ha/yr)") +
+  geom_text(aes(label = c("a", "b", "a", "b"), vjust = -5)) +
+  ylim(-0.1, max(standard.error.Bio$mean.Bio)*1.1)
+
+# Graph the total counts of disturbance
+Type.of.distrubance <- NEW.CARBON %>%
+  select(DSTRBNM, Region) %>%
+  filter(DSTRBNM != "No Visible Disturbance") %>%
+  ggplot(aes(x = DSTRBNM)) +
+  geom_bar(color = "black", fill = "white") +
+  theme_classic() +
+  facet_wrap(~ Region) +
+  xlab("Type of Disturbance") +
+  ylab("Total number of incidents") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1))
+
+# ggsave("Disturbance.Ecoregion.tiff", path = "/Users/louisgoodall/Desktop/HOLY FUCK A PHD/1st Semester (Spring 2022)/Geospatial Computation & Simulation/Project", width = 11, height = 7, dpi = 1000)
+
+# Table for county level % change in carbon
+COUNTY.CARBON <- NEW.CARBON %>%
+  group_by(COUNTYCD) %>%
+  summarise(n.Plots = n(),
+            mean = mean(PERC_CHNG_C_HEC_YR),
+            sd = sd(PERC_CHNG_C_HEC_YR),
+            se = sd/sqrt(n.Plots))
+
+# Table for county level % change in carbon
+COUNTY.BIOMASS <- PLEASE.END %>%
+  group_by(COUNTYCD) %>%
+  summarise(n.Plots = n(),
+            mean = mean(PERC_CHNG_Mg_HEC_YEAR),
+            sd = sd(PERC_CHNG_Mg_HEC_YEAR),
+            se = sd/sqrt(n.Plots))
+
+# Read in NC county shapefile data
+countiesNC <- st_read('/Users/louisgoodall/Desktop/North_Carolina_State_and_County_Boundary_Polygons/North_Carolina_State_and_County_Boundary_Polygons.shp')
+
+# Create county codes
+COUNTYCD <- c("001", "059", "119", "167", "003", "063", "123", "169", "007", "067", "135", "171", "025", "069", "145", "179", "033", "071", "149", "181", "035", "077", "151", "183", "037", "081", "157", "185", "045", "097", "159", "197", "057", "109", "161", "005", "039", "111", "189", "009", "043", "113", "193", "011", "075", "115", "199", "021", "087", "121", "023", "089", "173", "027", "099", "175")
+
+COUNTY.CARBON$COUNTYCD <- COUNTYCD
+
+countiesNC <- countiesNC %>%
+  filter(FIPS %in% c("001", "059", "119", "167", "003", "063", "123", "169", "007", "067", "135", "171", "025", "069", "145", "179", "033", "071", "149", "181", "035", "077", "151", "183", "037", "081", "157", "185", "045", "097", "159", "197", "057", "109", "161", "005", "039", "111", "189", "009", "043", "113", "193", "011", "075", "115", "199", "021", "087", "121", "023", "089", "173", "027", "099", "175"))
+
+# Filter out counties that are in the two ecoregions
+countiesNC$COUNTYCD <- COUNTYCD
+
+# Plot NC counties
+ggplot() +
+  geom_sf(data = countiesNC, size = 0.5, colour = "black", fill = "cyan1") +
+  coord_sf()
+
+# Plot map for carbon by county
+ggplot(countiesNC) +
+  geom_sf(aes(fill = COUNTY.CARBON$mean)) +
+  scale_fill_distiller(name  = "%") +
+  theme_classic() +
+  ggtitle("Mean change in carbon by county (2003 - 2020)")
+
+# Plot map for biomass by county
+ggplot(countiesNC) +
+  geom_sf(aes(fill = COUNTY.BIOMASS$mean)) +
+  scale_fill_distiller(name  = "%") +
+  theme_classic() +
+  ggtitle("Mean change in biomass by county (2003 - 2020)") %>%
+  geom_label_repel(aes(label = ifelse(mean > 3, as.character(COUNTY.CARBON$COUNTYCD), '')),
+                   nudge_y = 32)
+```
+
+
+
+
